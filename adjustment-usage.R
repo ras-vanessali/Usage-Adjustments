@@ -12,8 +12,8 @@ stdInd = 2
 ChangeRate=0.1
 
 ## MoM limit change
-month_limit = 9999
-##month_limit = .075
+#month_limit = 9999
+MoM_limit = .075
 
 ## Top and bottom lines for usage
 MinHours = .5*52/1000 # half an hour per week
@@ -24,8 +24,8 @@ MaxMiles = 300000/1000 # 300k per yr, from Chris estimate
 
 
 ######################### Read the input file ##################################
-setwd("H:/Projects/52_UsageModel/201912")
-excelfile_Usage = '20190904 UsageManagement.xlsx'
+setwd("C:/Users/vanessa.li/Documents/GitHub/Usage-Adjustments")
+excelfile_Usage = '20190904UsageManagement.xlsx'
 loadFile = paste(Sys.Date(),'UsageImport_VL.csv')
 
 #####################################################################################################################
@@ -76,8 +76,8 @@ Usage_Data<-sqlQuery(channel,"
                     AND MakeId NOT in (58137,78,14086,15766) --Miscellaneous,Not Attributed,Various,Mantis 
                   
                      AND MilesHours>0
-                     --AND SaleDate>@StartDate  AND [SaleDate]<=@EffectiveDate
-                     AND SaleDate>='2017-08-01'  AND [SaleDate]<='2019-12-31'
+                     AND SaleDate>@StartDate  AND [SaleDate]<=@EffectiveDate
+                     --AND SaleDate>='2017-08-01'  AND [SaleDate]<='2019-12-31'
                      AND [M1PrecedingABCost] IS NOT NULL
                      AND (Option15 is NULL or Option15 ='0')
                      
@@ -95,10 +95,24 @@ LastMonthUsage<-sqlQuery(channel,"SELECT
       ,[Intercept]
    
   FROM [ras_sas].[BI].[AppraisalBookUsageAdjCoefficientsMKT]
-  Where [AppraisalBookIssueId] = (Select max([AppraisalBookIssueId]) FROM [ras_sas].[BI].[AppraisalBookUsageAdjCoefficientsMKT])")
+  Where [AppraisalBookIssueId] = (Select max([AppraisalBookIssueId]) FROM [ras_sas].[BI].[AppraisalBookUsageAdjCoefficientsMKT] 
+                         where MarketCode ='USNA')")
 
 
+### MoM check function
+MoMlimit_intc <- function(last_month,current_month,limit){
+  upline = last_month * (1+ limit)
+  btline = last_month * (1- limit)
+  result = ifelse(is.na(last_month),current_month,pmin(upline,pmax(btline,current_month)))
+  return(result)
+}
 
+MoMlimit_slp <- function(last_month,current_month,limit){
+  upline = last_month * (1+ limit)
+  btline = last_month * (1- limit)
+  result = ifelse(is.na(last_month),current_month,pmax(upline,pmin(btline,current_month)))
+  return(result)
+}
 ############### Read input file by tabs ###################
 
 inputFeed<-read_excel(excelfile_Usage,sheet='In') %>%
@@ -145,16 +159,14 @@ unitMcode_SlpBr<-rbind(JoinSlpBr %>%
                          filter(is.na(MilesHoursCode)==T) %>%
                          mutate(MilesHoursCode = MeterCode),
                        JoinSlpBr %>% filter(MilesHoursCode==MeterCode)) %>%
-  filter(ifelse(MilesHoursCode=='M',Usage >= MinMiles & Usage <= MaxMiles, Usage >= MinHours & Usage <= MaxHours)) %>%
-  filter(!SaleMonth %in% c('2017-08','2019-09','2019-10','2019-11','2019-12')) 
+  filter(ifelse(MilesHoursCode=='M',Usage >= MinMiles & Usage <= MaxMiles, Usage >= MinHours & Usage <= MaxHours))
 
 unitMcode_SlpBr$MilesHoursCode<-as.factor(unitMcode_SlpBr$MilesHoursCode) 
 
 
 # Exclude bad data
 BadptExc<-unitMcode %>%
-  filter(ifelse(MilesHoursCode=='M',Usage >= MinMiles & Usage <= MaxMiles, Usage >= MinHours & Usage <= MaxHours)) %>%
-  filter(!SaleMonth %in% c('2017-08','2019-09','2019-10','2019-11','2019-12')) 
+  filter(ifelse(MilesHoursCode=='M',Usage >= MinMiles & Usage <= MaxMiles, Usage >= MinHours & Usage <= MaxHours)) 
 
 
 """
@@ -283,15 +295,13 @@ Application<-merge(AdjustOutput,applyall,by=c("Schedule"),all.y=T) %>%
 
 
 ######################### Get prior month values - prepare table to compare and set limit ####################
-LastMonthUsage$TSMedian_LM <- (log(1/LastMonthUsage$Intercept)/LastMonthUsage$Slope)*1000
-
 
 Cappedoutput<-merge(Application,LastMonthUsage,by=c('ClassificationId'),all.x=T) %>%
-  select(ClassificationId,Schedule,CategoryId,SubcategoryId,CategoryName,SubcategoryName,m1,m2,TSmed,nTotal,nAuc,Slope,Intercept,TSMedian_LM) %>%
+  select(ClassificationId,Schedule,CategoryId,SubcategoryId,CategoryName,SubcategoryName,TSmed,m1,m2,Slope,Intercept,nTotal,nAuc) %>%
   rename(SlopeLM=Slope,InterceptLM=Intercept,MedianFinal=TSmed)
 
 
-
+head(Cappedoutput)
 ###############################################################################################################################################
 ###################################################### Explore the share page and upload file ##################################################
 ###############################################################################################################################################
@@ -305,22 +315,21 @@ CapAdj <- merge(Cappedoutput,bounds,by=('Schedule'),all.x=T) %>%
                       ifelse(Overide =="Min",FlatBound,
                              ifelse(m2>0 | m2>FlatBound,FlatBound,
                                     ifelse(m2<SteepBound,SteepBound,m2))))) %>%
-  mutate(m2Final = ifelse(is.na(SlopeLM), capm2,pmax(pmin(capm2,SlopeLM/(1+month_limit)),SlopeLM*(1+month_limit)))) %>%
-  mutate(m1Final=1/(exp(m2Final*MedianFinal/1000))) %>%
+  mutate(m2Final = MoMlimit_slp(SlopeLM,capm2,MoM_limit)) %>%
+  mutate(m1calc=1/(exp(m2Final*MedianFinal/1000)),
+         m1Final = MoMlimit_intc(InterceptLM,m1calc,MoM_limit)) %>%
   mutate(Hrspct1 = (log(0.99)*1000)/m2Final,
-         Hrspct1_LM = (log(0.99)*1000)/SlopeLM,) %>%
-  mutate(diff_Median = (MedianFinal-TSMedian_LM)/TSMedian_LM,
-         diff_Slope = (m2Final-SlopeLM)/SlopeLM,
-         diff_Intercept =(m1Final-InterceptLM)/InterceptLM,
-         diff_Hrs1pct =(Hrspct1-Hrspct1_LM)/Hrspct1,
-         nTotalLM='',
-         nAucLM='')%>%
+         Hrspct1_LM = (log(0.99)*1000)/SlopeLM) %>%
+  mutate(diff_Slope = m2Final/SlopeLM-1,
+         diff_Intercept =m1Final/InterceptLM-1,
+         diff_Hrs1pct =Hrspct1/Hrspct1_LM-1)%>%
   #filter(is.na(diff_Slope))
   select(ClassificationId,Schedule,CategoryId,SubcategoryId,CategoryName,SubcategoryName,MeterCode,
-         TSMedian_LM,SlopeLM,InterceptLM,Hrspct1_LM,
+         SlopeLM,InterceptLM,Hrspct1_LM,
          nTotal,nAuc,
          MedianFinal,m2Final,m1Final,Hrspct1,
-         diff_Median,diff_Slope,diff_Intercept,diff_Hrs1pct) %>%
+         diff_Slope,diff_Intercept,diff_Hrs1pct
+         ) %>%
   arrange(MeterCode,Schedule)
 
 
@@ -338,7 +347,7 @@ UsageOutput<-CapAdj %>%
   rename(Category=CategoryName,Subcategory=SubcategoryName,Slope=m2Final,Intercept=m1Final)
 
 
-write.csv(SharePage,paste(Sys.Date(),'MoMSharePage_Usage_08.csv'))  
+write.csv(SharePage,paste(Sys.Date(),'MoMSharePage_Usage.csv'))  
 write.csv(UsageOutput,loadFile,row.names = F)                      
 
 
