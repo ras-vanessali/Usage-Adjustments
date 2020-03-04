@@ -351,3 +351,60 @@ write.csv(SharePage,paste(Sys.Date(),'MoMSharePage_Usage.csv'))
 write.csv(UsageOutput,loadFile,row.names = F)                      
 
 
+
+
+
+
+
+
+
+#################################### PLOTS ############################################
+plotUse_adjuster <- CapAdj %>% select(Schedule,SlopeLM,InterceptLM,MedianFinal,m2Final,m1Final) %>% distinct()
+plot_Use_dtpts<- rbind(data.frame(unitMcode_SlpBr %>% filter(saletype == 'Auction') %>% mutate(meterUse=Usage*1000) %>% select(Schedule,Y, meterUse)),
+                       data.frame(Auction_Data %>% select(Schedule,Y, meterUse)))
+
+
+
+
+seqMeter.1 = data.frame('meterRag' = seq(0,6000,100))
+matrixMeter1<-merge(plotUse_adjuster %>% filter(MedianFinal<6000),seqMeter.1) %>%
+  arrange(Schedule) %>% 
+  mutate(sfLM = InterceptLM  * exp((SlopeLM * meterRag)/1000),
+         sfcur = m1Final  * exp((m2Final  * meterRag)/1000)) 
+
+seqMeter.2 = data.frame('meterRag' = seq(0,300000,5000))
+matrixMeter2<-merge(plotUse_adjuster %>% filter(MedianFinal>6000),seqMeter.2) %>%
+  arrange(Schedule) %>% 
+  mutate(sfLM = InterceptLM  * exp((SlopeLM * meterRag)/1000),
+         sfcur = m1Final  * exp((m2Final  * meterRag)/1000)) 
+
+ 
+Regression_Curve = rbind(matrixMeter1,matrixMeter2)
+
+
+
+
+plot_list<-plotUse_adjuster %>% select(Schedule)
+for (i in 1:dim(plot_list)[1]){
+
+  subsetAuc<-subset(plot_Use_dtpts, plot_Use_dtpts$Schedule==plot_list[i,1])
+  
+  Maxpt = max(subsetAuc$meterUse)
+  ModelCurve<-subset(Regression_Curve,Regression_Curve$Schedule==plot_list[i,1])
+
+  
+  xaxis = c(0,Maxpt * 1.2)
+  yaxis = c(0,2) 
+  
+  draw_data<-xyplot(Y ~ meterUse, subsetAuc,pch=20,cex=1.1,col='dodgerblue3',main=list(label=paste(plot_list[i,1],""),font=2,cex=2),ylim=yaxis,xlim=xaxis)
+
+  draw_line.LM <- xyplot(sfLM ~ meterRag, ModelCurve,type=c('l'),col='dodgerblue3',lwd=3,pch=4,cex=1.5, lty=1,ylim=yaxis,xlim=xaxis)
+  draw_line.Cur <- xyplot(sfcur ~ meterRag, ModelCurve,type=c('l'),col='light blue',lwd=3,pch=4,cex=1.5, lty=3,ylim=yaxis,xlim=xaxis)
+  
+  draw<- draw_data +as.layer(draw_line.LM) +as.layer(draw_line.Cur)
+  
+  mypath<-file.path('H:/Projects/52_UsageModel/202001/Plots',paste(plot_list[i,1],'.png'))
+  png(file=mypath,width=1600,height=1200)
+  print(draw)
+  dev.off()
+}
