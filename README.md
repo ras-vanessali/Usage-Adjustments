@@ -1,7 +1,7 @@
 # Usage-Adjustments
 This program is to calculate the usage adjusters for C or CS level schedules. For each schedule, this program will return the slope and intercept. 
 
-## ## Prerequisites
+## Prerequisites
 a)  You need to have R studio installed in your computer. 
 b)  Download the most recent `UsageManagement.xlsx` from git or valuation share folder.
 c)  Install the following R libraries:
