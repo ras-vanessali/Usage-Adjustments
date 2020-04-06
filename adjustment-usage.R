@@ -6,6 +6,7 @@ library(tibble)
 library(readxl)
 library(latticeExtra)
 library(lattice)
+library(lubridate)
 
 stdInd = 2
 ## sense use rate of boundaries
@@ -24,9 +25,15 @@ MaxMiles = 300000/1000 # 300k per yr, from Chris estimate
 
 
 ######################### Read the input file ##################################
-setwd("C:/Users/vanessa.li/Documents/GitHub/Usage-Adjustments")
-excelfile_Usage = '20190904UsageManagement.xlsx'
+filepath = 'C:/Users/vanessa.li/Documents/GitHub/Usage-Adjustments'
+setwd(filepath)
+plotFolder = paste("Plots",Sys.Date())
+dir.create(plotFolder)
+excelfile_Usage = '20200311UsageManagement.xlsx'
 loadFile = paste(Sys.Date(),'UsageImport_VL.csv')
+
+### publish date is the last day of prior month
+publishDate <- Sys.Date() - days(day(Sys.Date()))
 
 #####################################################################################################################
 #####################################################################################################################
@@ -37,15 +44,15 @@ loadFile = paste(Sys.Date(),'UsageImport_VL.csv')
 
 channel<-odbcConnect("Production")
 Usage_Data<-sqlQuery(channel,"
-                      SET NOCOUNT ON
+                     SET NOCOUNT ON
 
-                      Declare @StartDate date = CAST(DATEADD(MONTH, DATEDIFF(MONTH, -1, DATEADD(year,-2,GETDATE()))-1, -1) as date)                   
+                      Declare @StartDate date = CAST(DATEADD(MONTH, DATEDIFF(MONTH, -1, DATEADD(year,-2,GETDATE()))-2, -1) as date)                   
                       Declare @EffectiveDate date = CAST(DATEADD(MONTH, DATEDIFF(MONTH, -1, GETDATE())-1, -1) AS date)
              
                      Declare @KMtoM decimal = 0.621371
                      
-                     IF OBJECT_ID('tempdb.dbo.#Data') is not NULL
-                     DROP TABLE #Data
+                     
+                     DROP TABLE IF exists #Data
                      
                      SELECT 
                      [InternetComparableId] 
@@ -59,6 +66,7 @@ Usage_Data<-sqlQuery(channel,"
                      ,cast(YEAR(SaleDate)-ModelYear + (MONTH(SaleDate)-6)/12.00 as decimal(10,4))  as Age
                      ,CASE WHEN MilesHoursCode='K' THEN MilesHours*@KMtoM ELSE MilesHours END AS MilesHours
                      ,CASE WHEN MilesHoursCode='K' THEN 'M' ELSE MilesHoursCode END AS [MilesHoursCode]
+					 ,EOMONTH([SaleDate]) as EffectiveDate
                      ,SaleMonth
                      ,[SaleDate]
                      ,[M1PrecedingFlv]
@@ -78,10 +86,10 @@ Usage_Data<-sqlQuery(channel,"
                      AND MilesHours>0
                      AND SaleDate>@StartDate  AND [SaleDate]<=@EffectiveDate
                      --AND SaleDate>='2017-08-01'  AND [SaleDate]<='2019-12-31'
-                     AND [M1PrecedingABCost] IS NOT NULL
+                     AND [M1PrecedingABCostUSNA] IS NOT NULL
                      AND (Option15 is NULL or Option15 ='0')
                      
-                     SELECT CategoryId,CategoryName, SubcategoryId,SubcategoryName,([MilesHours]/Age)/1000 as Usage, MilesHoursCode,Y,SaleDate,SaleMonth,saletype 
+                                SELECT CategoryId,CategoryName, SubcategoryId,SubcategoryName,([MilesHours]/Age)/1000 as Usage, MilesHoursCode,Y,SaleDate,SaleMonth,EffectiveDate,saletype 
                      FROM #Data WHERE Age>1.5 AND Y>0.1 AND Y<2
                 
                      ")
@@ -140,11 +148,12 @@ bounds <- rbind(data.frame(inputFeed) %>%
 
 
 ################################### Data Cleaning #######################################
-
+month_lost <- Usage_Data %>% select(EffectiveDate) %>% distinct() %>% arrange(EffectiveDate) %>% slice(1)
 ## Regression Data
+
 JoinData <- merge(Usage_Data,inputFeed,by=c("CategoryId","SubcategoryId"))
 
-
+## manage the meter code
 unitMcode<-rbind(JoinData %>%
                    filter(is.na(MilesHoursCode)==T) %>%
                    mutate(MilesHoursCode = MeterCode),
@@ -166,7 +175,9 @@ unitMcode_SlpBr$MilesHoursCode<-as.factor(unitMcode_SlpBr$MilesHoursCode)
 
 # Exclude bad data
 BadptExc<-unitMcode %>%
-  filter(ifelse(MilesHoursCode=='M',Usage >= MinMiles & Usage <= MaxMiles, Usage >= MinHours & Usage <= MaxHours)) 
+  filter(ifelse(MilesHoursCode=='M',Usage >= MinMiles & Usage <= MaxMiles, Usage >= MinHours & Usage <= MaxHours)) %>%
+  ## exclude the one-month data lost from last month to this month 
+  filter(as.Date(EffectiveDate) != as.Date(month_lost$EffectiveDate))
 
 
 """
@@ -361,9 +372,10 @@ write.csv(UsageOutput,loadFile,row.names = F)
 #################################### PLOTS ############################################
 plotUse_adjuster <- CapAdj %>% select(Schedule,SlopeLM,InterceptLM,MedianFinal,m2Final,m1Final) %>% distinct()
 plot_Use_dtpts<- rbind(data.frame(unitMcode_SlpBr %>% filter(saletype == 'Auction') %>% mutate(meterUse=Usage*1000) %>% select(Schedule,Y, meterUse)),
-                       data.frame(Auction_Data %>% select(Schedule,Y, meterUse)))
+                       data.frame(Auction_Data %>% select(Schedule,Y, meterUse)),
+                       )
 
-
+head(Auction_Data)
 
 
 seqMeter.1 = data.frame('meterRag' = seq(0,6000,100))
@@ -403,7 +415,7 @@ for (i in 1:dim(plot_list)[1]){
   
   draw<- draw_data +as.layer(draw_line.LM) +as.layer(draw_line.Cur)
   
-  mypath<-file.path('H:/Projects/52_UsageModel/202001/Plots',paste(plot_list[i,1],'.png'))
+  mypath<-file.path(plotFolder,paste(plot_list[i,1],'.png'))
   png(file=mypath,width=1600,height=1200)
   print(draw)
   dev.off()
