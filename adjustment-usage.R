@@ -3,7 +3,7 @@
 library(dplyr)
 library(RODBC)
 library(tibble)
-library(readxl)
+library(xlsx)
 library(latticeExtra)
 library(lattice)
 library(lubridate)
@@ -27,22 +27,20 @@ MaxMiles = 300000/1000 # 300k per yr, from Chris estimate
 ######################### Read the input file ##################################
 filepath = 'C:/Users/vanessa.li/Documents/GitHub/Usage-Adjustments'
 setwd(filepath)
-plotFolder = paste("Plots",Sys.Date())
-dir.create(plotFolder)
+#plotFolder = paste("Plots",Sys.Date())
+#dir.create(plotFolder)
 excelfile_Usage = '20200311UsageManagement.xlsx'
 loadFile = paste(Sys.Date(),'UsageImport_VL.csv')
 
 ### publish date is the last day of prior month
 publishDate <- Sys.Date() - days(day(Sys.Date()))
-
+channel<-odbcConnect("production")
 #####################################################################################################################
 #####################################################################################################################
 ############################################## Import SQL Table #####################################################
 ############# No Need to manually update DATE - Run with Last day of prior month as publish date ####################
 #####################################################################################################################
 
-
-channel<-odbcConnect("Production")
 Usage_Data<-sqlQuery(channel,"
                      SET NOCOUNT ON
 
@@ -75,7 +73,7 @@ Usage_Data<-sqlQuery(channel,"
                      FROM [ras_sas].[BI].[Comparables]
                      WHERE ([source]='internet' OR (saletype in ('retail','Dealer','Trade-In') 
                      AND M1Active='Active' 
-                     AND customerid in (SELECT  [CustomerID] FROM [ras_sas].[BI].[Customers] where [IsUsedForComparables]='y'))) 
+                     AND customerid in (SELECT  [CustomerID] FROM [ras_sas].[BI].[Customers] where [IsUsedForComparablesUSNA]='y'))) 
                      AND Modelyear between 2008 and 2020
                      AND CategoryID in (3,	6,	14,	15,	20,	23,	25, 27,	28,	29,	30,	32,	35,	36,	164,	313,	314,	315,	316,	317,	360,	
                      362,	451,	452,	453,	2300,	2506, 2507, 2509,	2511,	2512,	2514, 2515,	2525,	2599,	2603,	2604,	2605,	2608,
@@ -96,7 +94,6 @@ Usage_Data<-sqlQuery(channel,"
 
 
 ########## Last month published values ################
-channel<-odbcConnect("Production")
 LastMonthUsage<-sqlQuery(channel,"SELECT 
       [ClassificationId]
       ,[Slope]
@@ -121,16 +118,16 @@ MoMlimit_slp <- function(last_month,current_month,limit){
   result = ifelse(is.na(last_month),current_month,pmax(upline,pmin(btline,current_month)))
   return(result)
 }
-############### Read input file by tabs ###################
 
-inputFeed<-read_excel(excelfile_Usage,sheet='In') %>%
+############### Read input file by tabs ###################
+inputFeed<-data.frame(read.xlsx(excelfile_Usage,sheetName='In')) %>%
   select(-CategoryName, -SubcategoryName, -MakeName, -CSMM, -ValidSchedule)
-apply<-read_excel(excelfile_Usage,sheet='Out') %>%
+apply<-data.frame(read.xlsx(excelfile_Usage,sheetName='Out')) %>%
   select(-CSMM,DupeSchids,ValidSchedule)
 
-inputBorw<-read_excel(excelfile_Usage,sheet='InA') %>%
+inputBorw<-data.frame(read.xlsx(excelfile_Usage,sheetName='InA')) %>%
   select(-CategoryName, -SubcategoryName, -MakeName, -CSMM, -ValidSchedule,-CheckJoin)
-applyBorw<-read_excel(excelfile_Usage,sheet='OutA') %>%
+applyBorw<-data.frame(read.xlsx(excelfile_Usage,sheetName='OutA')) %>%
   select(-CSMM,DupeSchids,ValidSchedule)
 
 ######### combine two output tabs ##########
@@ -167,7 +164,7 @@ JoinSlpBr <- merge(Usage_Data,inputBorw,by=c("CategoryId","SubcategoryId"))
 unitMcode_SlpBr<-rbind(JoinSlpBr %>%
                          filter(is.na(MilesHoursCode)==T) %>%
                          mutate(MilesHoursCode = MeterCode),
-                       JoinSlpBr %>% filter(MilesHoursCode==MeterCode)) %>%
+                       JoinSlpBr %>% filter(as.character(MilesHoursCode)== as.character(MeterCode))) %>%
   filter(ifelse(MilesHoursCode=='M',Usage >= MinMiles & Usage <= MaxMiles, Usage >= MinHours & Usage <= MaxHours))
 
 unitMcode_SlpBr$MilesHoursCode<-as.factor(unitMcode_SlpBr$MilesHoursCode) 
@@ -179,28 +176,6 @@ BadptExc<-unitMcode %>%
   ## exclude the one-month data lost from last month to this month 
   filter(as.Date(EffectiveDate) != as.Date(month_lost$EffectiveDate))
 
-
-"""
-### work on last month data
-LastM_bySched<-merge(LastMonthUsage,inputFeed,by='ClassificationId') %>%
-  select(Schedule,Slope,Intercept) %>%
-  group_by(Schedule) %>%
-  filter(row_number()==1)
-
-LastM_est <-merge(BadptExc,LastM_bySched,by='Schedule') %>%
-  mutate(est_y = Intercept * exp(Slope * Usage)) %>%
-  mutate(index = Y/est_y)
-
-################################### Data Regrouping #######################################
-
-### subset to auction data only
-Auction_Data<-LastM_est %>%
-  filter(saletype=='Auction') %>%
-  mutate(meterUse=Usage*1000) %>%
-  group_by(Schedule) %>%
-  filter(meterUse <= mean(meterUse) + stdInd*sd(meterUse) & meterUse>= mean(meterUse) - stdInd*sd(meterUse)) %>%
-  filter(index <= mean(index) + stdInd*sd(index) & index>= mean(index) - stdInd*sd(index))
-"""
 
 Auction_Data<-BadptExc %>%
   filter(saletype=='Auction') %>%
@@ -312,7 +287,6 @@ Cappedoutput<-merge(Application,LastMonthUsage,by=c('ClassificationId'),all.x=T)
   rename(SlopeLM=Slope,InterceptLM=Intercept,MedianFinal=TSmed)
 
 
-head(Cappedoutput)
 ###############################################################################################################################################
 ###################################################### Explore the share page and upload file ##################################################
 ###############################################################################################################################################
@@ -358,65 +332,9 @@ UsageOutput<-CapAdj %>%
   rename(Category=CategoryName,Subcategory=SubcategoryName,Slope=m2Final,Intercept=m1Final)
 
 
-write.csv(SharePage,paste(Sys.Date(),'MoMSharePage_Usage.csv'))  
+
+write.xlsx2(as.data.frame(SharePage),file = paste(Sys.Date(),'MoMSharePage_Usage.xlsx'), sheetName = 'Sheet1',row.names = F)
 write.csv(UsageOutput,loadFile,row.names = F)                      
 
 
 
-
-
-
-
-
-
-#################################### PLOTS ############################################
-plotUse_adjuster <- CapAdj %>% select(Schedule,SlopeLM,InterceptLM,MedianFinal,m2Final,m1Final) %>% distinct()
-plot_Use_dtpts<- rbind(data.frame(unitMcode_SlpBr %>% filter(saletype == 'Auction') %>% mutate(meterUse=Usage*1000) %>% select(Schedule,Y, meterUse)),
-                       data.frame(Auction_Data %>% select(Schedule,Y, meterUse)),
-                       )
-
-head(Auction_Data)
-
-
-seqMeter.1 = data.frame('meterRag' = seq(0,6000,100))
-matrixMeter1<-merge(plotUse_adjuster %>% filter(MedianFinal<6000),seqMeter.1) %>%
-  arrange(Schedule) %>% 
-  mutate(sfLM = InterceptLM  * exp((SlopeLM * meterRag)/1000),
-         sfcur = m1Final  * exp((m2Final  * meterRag)/1000)) 
-
-seqMeter.2 = data.frame('meterRag' = seq(0,300000,5000))
-matrixMeter2<-merge(plotUse_adjuster %>% filter(MedianFinal>6000),seqMeter.2) %>%
-  arrange(Schedule) %>% 
-  mutate(sfLM = InterceptLM  * exp((SlopeLM * meterRag)/1000),
-         sfcur = m1Final  * exp((m2Final  * meterRag)/1000)) 
-
- 
-Regression_Curve = rbind(matrixMeter1,matrixMeter2)
-
-
-
-
-plot_list<-plotUse_adjuster %>% select(Schedule)
-for (i in 1:dim(plot_list)[1]){
-
-  subsetAuc<-subset(plot_Use_dtpts, plot_Use_dtpts$Schedule==plot_list[i,1])
-  
-  Maxpt = max(subsetAuc$meterUse)
-  ModelCurve<-subset(Regression_Curve,Regression_Curve$Schedule==plot_list[i,1])
-
-  
-  xaxis = c(0,Maxpt * 1.2)
-  yaxis = c(0,2) 
-  
-  draw_data<-xyplot(Y ~ meterUse, subsetAuc,pch=20,cex=1.1,col='dodgerblue3',main=list(label=paste(plot_list[i,1],""),font=2,cex=2),ylim=yaxis,xlim=xaxis)
-
-  draw_line.LM <- xyplot(sfLM ~ meterRag, ModelCurve,type=c('l'),col='dodgerblue3',lwd=3,pch=4,cex=1.5, lty=1,ylim=yaxis,xlim=xaxis)
-  draw_line.Cur <- xyplot(sfcur ~ meterRag, ModelCurve,type=c('l'),col='light blue',lwd=3,pch=4,cex=1.5, lty=3,ylim=yaxis,xlim=xaxis)
-  
-  draw<- draw_data +as.layer(draw_line.LM) +as.layer(draw_line.Cur)
-  
-  mypath<-file.path(plotFolder,paste(plot_list[i,1],'.png'))
-  png(file=mypath,width=1600,height=1200)
-  print(draw)
-  dev.off()
-}
